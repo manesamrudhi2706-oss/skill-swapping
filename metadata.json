@@ -1,0 +1,8 @@
+{
+  "name": "Sigma",
+  "description": "Professional skill-swap platform for developers to exchange expertise through real-time pair programming sessions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
