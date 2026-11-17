@@ -18,7 +18,7 @@ import type {
   UserProfile,
 } from './types/sigma.ts';
 import { CHALLENGE_PRESETS } from './data/presets.ts';
-import { apiFetch, setAuthToken } from './lib/api.ts';
+import { apiFetch, safeJson, setAuthToken } from './lib/api.ts';
 import { AuthView } from './components/AuthView.tsx';
 import { DirectoryView } from './components/DirectoryView.tsx';
 import { SwapsView } from './components/SwapsView.tsx';
@@ -78,6 +78,43 @@ export default function App() {
     }
   }, [darkMode]);
 
+  function readCachedSwaps(uid: string): SwapSession[] {
+    try {
+      const raw = localStorage.getItem(`sigma_swaps_${uid}`);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as SwapSession[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeCachedSwaps(uid: string, list: SwapSession[]) {
+    try {
+      localStorage.setItem(`sigma_swaps_${uid}`, JSON.stringify(list.slice(0, 60)));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  function readCachedProfile(uid: string): UserProfile | null {
+    try {
+      const raw = localStorage.getItem(`sigma_profile_${uid}`);
+      if (!raw) return null;
+      return JSON.parse(raw) as UserProfile;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeCachedProfile(profile: UserProfile) {
+    try {
+      localStorage.setItem(`sigma_profile_${profile.id}`, JSON.stringify(profile));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
   // Verify active authenticated session on boot
   useEffect(() => {
     let active = true;
@@ -87,8 +124,14 @@ export default function App() {
           setAuthToken(null);
           return null;
         }
-        const data = (await res.json()) as { user?: UserProfile };
-        return data.user || null;
+        const data = await safeJson<{ user?: UserProfile }>(res);
+        if (!data?.user) return null;
+        const cached = readCachedProfile(data.user.id);
+        // Merge cached profile fields (bio/offers/seeks/projects) if server lambda restarted fresh
+        if (cached && (!data.user.projects?.length && cached.projects?.length)) {
+          return { ...data.user, ...cached };
+        }
+        return data.user;
       })
       .then((user) => {
         if (!active) return;
@@ -106,6 +149,7 @@ export default function App() {
   }, []);
 
   const fetchPlatformData = async () => {
+    if (!userProfile) return;
     setLoadingData(true);
     setLoadError(null);
     try {
@@ -121,11 +165,24 @@ export default function App() {
       if (!devRes.ok || !swapRes.ok) {
         throw new Error('Failed to load workspace data');
       }
-      const devData = (await devRes.json()) as { developers: DeveloperProfile[] };
-      const swapData = (await swapRes.json()) as { swaps: SwapSession[] };
+      const devData = await safeJson<{ developers: DeveloperProfile[] }>(devRes);
+      const swapData = await safeJson<{ swaps: SwapSession[] }>(swapRes);
+      if (!devData || !swapData) {
+        throw new Error('Unexpected response format from Sigma API');
+      }
       setDevelopers(devData.developers || []);
-      const loadedSwaps = swapData.swaps || [];
+      const serverSwaps = swapData.swaps || [];
+      const cached = readCachedSwaps(userProfile.id);
+      const mergedMap = new Map<string, SwapSession>();
+      for (const s of serverSwaps) mergedMap.set(s.id, s);
+      for (const c of cached) {
+        if (!mergedMap.has(c.id) && (c.requesterId === userProfile.id || c.partnerId === userProfile.id)) {
+          mergedMap.set(c.id, c);
+        }
+      }
+      const loadedSwaps = Array.from(mergedMap.values()).sort((a, b) => b.createdAt - a.createdAt);
       setSwaps(loadedSwaps);
+      writeCachedSwaps(userProfile.id, loadedSwaps);
       if (!activeRoomId && loadedSwaps[0]?.roomId) {
         setActiveRoomId(loadedSwaps[0].roomId);
       }
@@ -138,6 +195,7 @@ export default function App() {
 
   useEffect(() => {
     if (userProfile) {
+      writeCachedProfile(userProfile);
       fetchPlatformData();
     }
   }, [userProfile?.id]);
@@ -178,13 +236,17 @@ export default function App() {
       body: JSON.stringify(updated),
     });
     if (res.ok) {
-      const data = (await res.json()) as { user: UserProfile };
-      setUserProfile(data.user);
+      const data = await safeJson<{ user: UserProfile; token?: string }>(res);
+      if (data?.user) {
+        if (data.token) setAuthToken(data.token);
+        writeCachedProfile(data.user);
+        setUserProfile(data.user);
+      }
     }
   };
 
   const handleLogout = async () => {
-    await apiFetch('/api/auth/logout', { method: 'POST' });
+    await apiFetch('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
     setAuthToken(null);
     setUserProfile(null);
     setSwaps([]);
@@ -227,13 +289,19 @@ export default function App() {
     });
 
     if (res.ok) {
-      const data = (await res.json()) as { swap: SwapSession };
-      setSwaps((prev) => [data.swap, ...prev]);
-      setProposalPartner(null);
-      if (payload.immediateActive) {
-        openStudioRoom(data.swap.roomId);
-      } else {
-        navigateTo('swaps');
+      const data = await safeJson<{ swap: SwapSession }>(res);
+      if (data?.swap) {
+        setSwaps((prev) => {
+          const next = [data.swap, ...prev];
+          if (userProfile) writeCachedSwaps(userProfile.id, next);
+          return next;
+        });
+        setProposalPartner(null);
+        if (payload.immediateActive) {
+          openStudioRoom(data.swap.roomId);
+        } else {
+          navigateTo('swaps');
+        }
       }
     }
   };
@@ -271,9 +339,29 @@ export default function App() {
       body: JSON.stringify({ status }),
     });
     if (res.ok) {
-      const data = (await res.json()) as { swap: SwapSession; user?: UserProfile };
-      setSwaps((prev) => prev.map((s) => (s.id === swapId ? data.swap : s)));
-      if (data.user) setUserProfile(data.user);
+      const data = await safeJson<{ swap?: SwapSession; user?: UserProfile }>(res);
+      setSwaps((prev) => {
+        const next = prev.map((s) => {
+          if (s.id !== swapId) return s;
+          if (data?.swap) return data.swap;
+          return {
+            ...s,
+            status,
+            scheduledLabel:
+              status === 'completed'
+                ? 'Completed just now'
+                : status === 'active'
+                  ? 'Active session'
+                  : 'Declined',
+          };
+        });
+        if (userProfile) writeCachedSwaps(userProfile.id, next);
+        return next;
+      });
+      if (data?.user) {
+        writeCachedProfile(data.user);
+        setUserProfile(data.user);
+      }
     }
   };
 
@@ -298,8 +386,10 @@ export default function App() {
       }),
     });
     if (res.ok) {
-      const data = (await res.json()) as { room: { roomId: string } };
-      openStudioRoom(data.room.roomId);
+      const data = await safeJson<{ room: { roomId: string } }>(res);
+      if (data?.room?.roomId) {
+        openStudioRoom(data.room.roomId);
+      }
     }
   };
 

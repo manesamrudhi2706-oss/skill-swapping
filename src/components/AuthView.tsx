@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Eye, EyeOff, Lock, Moon, Sun } from 'lucide-react';
 import type { SkillTier, UserProfile } from '../types/sigma.ts';
 import { SKILL_CATALOG, SKILL_TIERS } from '../data/presets.ts';
-import { setAuthToken } from '../lib/api.ts';
+import { safeJson, setAuthToken } from '../lib/api.ts';
 import { Avatar } from './Avatar.tsx';
 
 interface AuthViewProps {
@@ -95,9 +95,9 @@ export function AuthView({ darkMode, onToggleTheme, onAuthenticated }: AuthViewP
         body: JSON.stringify(payload),
       });
 
-      const data = (await res.json()) as { user?: UserProfile; token?: string; error?: string };
-      if (!res.ok || !data.user) {
-        setError(data.error || 'Authentication failed. Please check your details.');
+      const data = await safeJson<{ user?: UserProfile; token?: string; error?: string }>(res);
+      if (!res.ok || !data?.user) {
+        setError(data?.error || 'Authentication failed. Please check your details and try again.');
         return;
       }
 
@@ -129,9 +129,9 @@ export function AuthView({ darkMode, onToggleTheme, onAuthenticated }: AuthViewP
           password: password || '',
         }),
       });
-      const data = (await res.json()) as { user?: UserProfile; token?: string; error?: string };
-      if (!res.ok || !data.user) {
-        setError(data.error || 'Unable to sign in.');
+      const data = await safeJson<{ user?: UserProfile; token?: string; error?: string }>(res);
+      if (!res.ok || !data?.user) {
+        setError(data?.error || 'Unable to sign in right now. Please try again.');
         return;
       }
       if (data.token) setAuthToken(data.token);

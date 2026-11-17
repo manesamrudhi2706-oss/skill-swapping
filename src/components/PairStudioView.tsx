@@ -28,7 +28,7 @@ import type {
   UserProfile,
 } from '../types/sigma.ts';
 import { CHALLENGE_PRESETS, LANGUAGE_LABELS } from '../data/presets.ts';
-import { apiFetch, getAuthToken } from '../lib/api.ts';
+import { apiFetch, getAuthToken, safeJson } from '../lib/api.ts';
 
 interface PairStudioViewProps {
   roomId: string;
@@ -38,9 +38,78 @@ interface PairStudioViewProps {
   onBackToSwaps: () => void;
 }
 
-type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting';
+type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'serverless';
 type RightTab = 'chat' | 'notes' | 'annotations';
 type MobilePane = 'editor' | 'workspace' | 'collab';
+
+function buildLocalFallbackRoom(roomId: string, userProfile: UserProfile, clientId: string): RoomState {
+  const preset = CHALLENGE_PRESETS[0];
+  return {
+    roomId,
+    ownerId: userProfile.id,
+    allowedUserIds: [userProfile.id],
+    isPrivate: false,
+    title: preset.title,
+    offerSkill: userProfile.offers[0] || 'TypeScript',
+    seekSkill: userProfile.seeks[0] || 'System Design',
+    language: preset.language,
+    files: [
+      {
+        id: 'file_main',
+        name: preset.fileName,
+        language: preset.language,
+        content: preset.code,
+      },
+      {
+        id: 'file_notes',
+        name: 'pairing_plan.md',
+        language: 'typescript',
+        content: `// Session Notes & Pairing Plan\n// 1. Align on constraints and edge cases\n// 2. Write and run test cases in Shared Output Console\n`,
+      },
+    ],
+    activeFileId: 'file_main',
+    participants: [
+      {
+        clientId,
+        userId: userProfile.id,
+        name: userProfile.name,
+        handle: userProfile.handle,
+        color: '#2563EB',
+        role: 'driver',
+        cursorLine: 1,
+        cursorCol: 1,
+        joinedAt: Date.now(),
+      },
+    ],
+    checklist: preset.checklist.map((text, idx) => ({
+      id: `chk_${idx}_${Date.now()}`,
+      text,
+      done: idx === 0,
+    })),
+    notes: 'Focus areas:\n- Keep functions pure where possible for unit testing\n- Benchmark latency and edge cases before finalizing',
+    messages: [
+      {
+        id: `msg_sys_${Date.now()}`,
+        senderId: 'system',
+        senderName: 'Session Host',
+        senderHandle: '@sigma',
+        color: '#475569',
+        text: `Room ${roomId} ready in serverless workspace mode.`,
+        timestamp: Date.now(),
+      },
+    ],
+    annotations: [],
+    executionLogs: [],
+    timer: {
+      durationSeconds: 45 * 60,
+      elapsedBeforePause: 0,
+      startedAt: null,
+      running: false,
+    },
+    driverId: clientId,
+    createdAt: Date.now(),
+  };
+}
 
 export function PairStudioView({
   roomId,
@@ -72,6 +141,9 @@ export function PairStudioView({
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const broadcastRef = useRef<BroadcastChannel | null>(null);
+  const serverlessActiveRef = useRef(false);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -81,23 +153,195 @@ export function PairStudioView({
     return () => clearInterval(id);
   }, []);
 
+  const roomStorageKey = `sigma_room_${roomId}_${userProfile.id}`;
+
+  const persistServerlessRoom = (nextRoom: RoomState) => {
+    try {
+      localStorage.setItem(roomStorageKey, JSON.stringify(nextRoom));
+    } catch {
+      // Ignore storage quota errors
+    }
+    try {
+      broadcastRef.current?.postMessage({ senderClientId: clientId, room: nextRoom });
+    } catch {
+      // Ignore BroadcastChannel errors
+    }
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(() => {
+      apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: nextRoom.title,
+          offerSkill: nextRoom.offerSkill,
+          seekSkill: nextRoom.seekSkill,
+          files: nextRoom.files,
+          activeFileId: nextRoom.activeFileId,
+          language: nextRoom.language,
+          notes: nextRoom.notes,
+          checklist: nextRoom.checklist,
+          annotations: nextRoom.annotations,
+          messages: nextRoom.messages,
+          executionLogs: nextRoom.executionLogs,
+          timer: nextRoom.timer,
+        }),
+      }).catch(() => undefined);
+    }, 450);
+  };
+
+  const applyLocalRoomMutation = (updater: (prev: RoomState) => RoomState) => {
+    setRoom((prev) => {
+      if (!prev) return prev;
+      const next = updater(prev);
+      if (serverlessActiveRef.current) {
+        persistServerlessRoom(next);
+      }
+      return next;
+    });
+  };
+
   useEffect(() => {
     let closedByEffect = false;
     let attempt = 0;
+    let handshakeResolved = false;
+    serverlessActiveRef.current = false;
     setRoomError(null);
     setRoom(null);
 
-    function connect() {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const channel = new BroadcastChannel(`sigma_room_${roomId}`);
+      broadcastRef.current = channel;
+      channel.onmessage = (ev) => {
+        const msg = ev.data as { senderClientId?: string; room?: RoomState } | null;
+        if (!msg?.room || msg.senderClientId === clientId) return;
+        if (serverlessActiveRef.current) {
+          setRoom((prev) => {
+            if (!prev) return msg.room!;
+            const myEntry = prev.participants.find((p) => p.clientId === clientId);
+            const others = (msg.room!.participants || []).filter((p) => p.clientId !== clientId);
+            return {
+              ...msg.room!,
+              participants: myEntry ? [myEntry, ...others] : msg.room!.participants,
+            };
+          });
+        }
+      };
+    }
+
+    async function activateServerlessFallback() {
+      if (closedByEffect || serverlessActiveRef.current) return;
+      serverlessActiveRef.current = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      if (wsRef.current) {
+        try {
+          wsRef.current.close();
+        } catch {
+          // Ignore close error
+        }
+        wsRef.current = null;
+      }
+      setConnStatus('serverless');
+
+      let hydrated: RoomState | null = null;
+      try {
+        const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}`);
+        if (res.status === 403) {
+          const errData = await safeJson<{ error?: string }>(res);
+          if (!closedByEffect) {
+            setRoomError(errData?.error || 'This workspace is private to its owner.');
+          }
+          return;
+        }
+        if (res.ok) {
+          const data = await safeJson<{ room?: RoomState }>(res);
+          if (data?.room) hydrated = data.room;
+        }
+      } catch {
+        // Offline or unreachable fallback below
+      }
+
       if (closedByEffect) return;
+
+      let localCached: RoomState | null = null;
+      try {
+        const raw = localStorage.getItem(roomStorageKey);
+        if (raw) localCached = JSON.parse(raw) as RoomState;
+      } catch {
+        localCached = null;
+      }
+
+      let finalRoom: RoomState;
+      if (hydrated && localCached) {
+        const serverLooksFresh =
+          hydrated.messages.length <= 1 &&
+          hydrated.executionLogs.length === 0 &&
+          hydrated.annotations.length === 0 &&
+          localCached.files.length > 0;
+        finalRoom = serverLooksFresh
+          ? { ...localCached, isPrivate: hydrated.isPrivate, ownerId: hydrated.ownerId }
+          : hydrated;
+      } else {
+        finalRoom = hydrated || localCached || buildLocalFallbackRoom(roomId, userProfile, clientId);
+      }
+
+      const selfParticipant: RoomParticipant = {
+        clientId,
+        userId: userProfile.id,
+        name: userProfile.name,
+        handle: userProfile.handle,
+        color: '#2563EB',
+        role: finalRoom.driverId && finalRoom.driverId !== clientId ? 'navigator' : 'driver',
+        cursorLine: 1,
+        cursorCol: 1,
+        joinedAt: Date.now(),
+      };
+      const others = (finalRoom.participants || []).filter((p) => p.clientId !== clientId);
+      finalRoom = {
+        ...finalRoom,
+        driverId: finalRoom.driverId || clientId,
+        participants: [selfParticipant, ...others],
+      };
+
+      setRoom(finalRoom);
+      setRoomError(null);
+      try {
+        localStorage.setItem(roomStorageKey, JSON.stringify(finalRoom));
+      } catch {
+        // Ignore storage error
+      }
+    }
+
+    // If WebSocket never delivers room:state within 2200ms (typical on Vercel), switch smoothly to serverless mode
+    const fallbackTimeout = setTimeout(() => {
+      if (!handshakeResolved && !closedByEffect) {
+        activateServerlessFallback();
+      }
+    }, 2200);
+
+    function connect() {
+      if (closedByEffect || serverlessActiveRef.current) return;
       setConnStatus(attempt === 0 ? 'connecting' : 'reconnecting');
 
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const token = getAuthToken();
       const wsQuery = token ? `?token=${encodeURIComponent(token)}` : '';
-      const socket = new WebSocket(`${proto}//${window.location.host}/ws${wsQuery}`);
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(`${proto}//${window.location.host}/ws${wsQuery}`);
+      } catch {
+        activateServerlessFallback();
+        return;
+      }
       wsRef.current = socket;
 
       socket.onopen = () => {
+        if (serverlessActiveRef.current) {
+          socket.close();
+          return;
+        }
         attempt = 0;
         setConnStatus('connected');
         socket.send(
@@ -120,11 +364,13 @@ export function PairStudioView({
         const type = String(data.type || '');
 
         if (type === 'room:error') {
+          handshakeResolved = true;
           setRoomError(String(data.message || 'Unable to access this workspace.'));
           return;
         }
 
         if (type === 'room:state' && data.room) {
+          handshakeResolved = true;
           setRoom(data.room as RoomState);
           setRoomError(null);
           return;
@@ -251,10 +497,15 @@ export function PairStudioView({
       };
 
       socket.onclose = (ev) => {
-        if (closedByEffect || ev.code === 4401) return;
+        if (closedByEffect || ev.code === 4401 || serverlessActiveRef.current) return;
         attempt += 1;
+        // If we haven't established a WS handshake after 1 retry, switch to Vercel serverless fallback immediately
+        if (!handshakeResolved && attempt >= 2) {
+          activateServerlessFallback();
+          return;
+        }
         setConnStatus('reconnecting');
-        const backoff = Math.min(3000, 750 * attempt);
+        const backoff = Math.min(2000, 600 * attempt);
         reconnectTimerRef.current = setTimeout(connect, backoff);
       };
     }
@@ -263,7 +514,13 @@ export function PairStudioView({
 
     return () => {
       closedByEffect = true;
+      clearTimeout(fallbackTimeout);
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+      if (broadcastRef.current) {
+        broadcastRef.current.close();
+        broadcastRef.current = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -318,23 +575,21 @@ export function PairStudioView({
       body: JSON.stringify({ isPrivate: !room.isPrivate }),
     });
     if (res.ok) {
-      const data = (await res.json()) as { isPrivate: boolean };
-      setRoom((prev) => (prev ? { ...prev, isPrivate: data.isPrivate } : prev));
+      const data = await safeJson<{ isPrivate: boolean }>(res);
+      if (data) {
+        applyLocalRoomMutation((prev) => ({ ...prev, isPrivate: data.isPrivate }));
+      }
     }
   };
 
   const handleCodeChange = (nextContent: string) => {
     if (!activeFile) return;
-    setRoom((prev) =>
-      prev
-        ? {
-            ...prev,
-            files: prev.files.map((f) =>
-              f.id === activeFile.id ? { ...f, content: nextContent } : f
-            ),
-          }
-        : prev
-    );
+    applyLocalRoomMutation((prev) => ({
+      ...prev,
+      files: prev.files.map((f) =>
+        f.id === activeFile.id ? { ...f, content: nextContent } : f
+      ),
+    }));
     sendWs({ type: 'code:update', fileId: activeFile.id, content: nextContent });
   };
 
@@ -346,7 +601,18 @@ export function PairStudioView({
     const split = upToCursor.split('\n');
     const line = split.length;
     const col = split[split.length - 1].length + 1;
-    sendWs({ type: 'cursor:move', line, col });
+    if (!sendWs({ type: 'cursor:move', line, col })) {
+      setRoom((prev) =>
+        prev
+          ? {
+              ...prev,
+              participants: prev.participants.map((p) =>
+                p.clientId === clientId ? { ...p, cursorLine: line, cursorCol: col } : p
+              ),
+            }
+          : prev
+      );
+    }
   };
 
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -388,13 +654,13 @@ export function PairStudioView({
             language: activeFile.language,
           }),
         });
-        const data = (await res.json()) as { result?: ExecutionResult };
-        if (data.result) {
-          setRoom((prev) =>
-            prev
-              ? { ...prev, executionLogs: [data.result!, ...prev.executionLogs].slice(0, 20) }
-              : prev
-          );
+        const data = await safeJson<{ result?: ExecutionResult }>(res);
+        if (data?.result) {
+          const result = data.result;
+          applyLocalRoomMutation((prev) => ({
+            ...prev,
+            executionLogs: [result, ...prev.executionLogs].slice(0, 20),
+          }));
         }
       } finally {
         setRunningCode(false);
@@ -420,33 +686,65 @@ export function PairStudioView({
       text,
       lineRef: chatLineRef,
     });
-    if (sent) {
-      setChatInput('');
-      setChatLineRef(undefined);
+    if (!sent) {
+      const msg: ChatMessage = {
+        id: msgId,
+        senderId: userProfile.id,
+        senderName: userProfile.name,
+        senderHandle: userProfile.handle,
+        color: '#2563EB',
+        text,
+        lineRef: chatLineRef,
+        timestamp: Date.now(),
+      };
+      applyLocalRoomMutation((prev) => ({
+        ...prev,
+        messages: [...prev.messages, msg].slice(-150),
+      }));
     }
+    setChatInput('');
+    setChatLineRef(undefined);
   };
 
   const handleAddChecklistItem = (e: React.FormEvent) => {
     e.preventDefault();
     const text = newTaskText.trim();
     if (!text) return;
-    sendWs({
-      type: 'checklist:add',
-      itemId: `chk_${Date.now()}`,
-      text,
-    });
+    const itemId = `chk_${Date.now()}`;
+    if (!sendWs({ type: 'checklist:add', itemId, text })) {
+      applyLocalRoomMutation((prev) => ({
+        ...prev,
+        checklist: [...prev.checklist, { id: itemId, text, done: false }],
+      }));
+    }
     setNewTaskText('');
+  };
+
+  const handleToggleChecklistItem = (itemId: string) => {
+    if (!sendWs({ type: 'checklist:toggle', itemId })) {
+      applyLocalRoomMutation((prev) => ({
+        ...prev,
+        checklist: prev.checklist.map((c) => (c.id === itemId ? { ...c, done: !c.done } : c)),
+      }));
+    }
   };
 
   const handleCreateFile = (e: React.FormEvent) => {
     e.preventDefault();
     const name = newFileName.trim();
     if (!name) return;
-    sendWs({
-      type: 'file:create',
-      name,
-      language: room?.language || 'typescript',
-    });
+    const language = room?.language || 'typescript';
+    if (!sendWs({ type: 'file:create', name, language })) {
+      const newId = `file_${Date.now()}`;
+      applyLocalRoomMutation((prev) => ({
+        ...prev,
+        activeFileId: newId,
+        files: [
+          ...prev.files,
+          { id: newId, name, language, content: `// ${name}\n` },
+        ],
+      }));
+    }
     setNewFileName('');
     setShowNewFileInput(false);
   };
@@ -454,16 +752,105 @@ export function PairStudioView({
   const handleAddAnnotation = (e: React.FormEvent) => {
     e.preventDefault();
     if (!annotatingLine || !annotationDraft.trim() || !activeFile) return;
-    sendWs({
-      type: 'annotation:add',
-      id: `ann_${Date.now()}`,
-      fileId: activeFile.id,
-      line: annotatingLine,
-      text: annotationDraft.trim(),
-    });
+    const annId = `ann_${Date.now()}`;
+    const text = annotationDraft.trim();
+    if (
+      !sendWs({
+        type: 'annotation:add',
+        id: annId,
+        fileId: activeFile.id,
+        line: annotatingLine,
+        text,
+      })
+    ) {
+      const newAnn: LineAnnotation = {
+        id: annId,
+        fileId: activeFile.id,
+        line: annotatingLine,
+        authorName: userProfile.name,
+        authorHandle: userProfile.handle,
+        color: '#2563EB',
+        text,
+        resolved: false,
+        createdAt: Date.now(),
+      };
+      applyLocalRoomMutation((prev) => ({
+        ...prev,
+        annotations: [newAnn, ...prev.annotations],
+      }));
+    }
     setAnnotationDraft('');
     setAnnotatingLine(null);
     setRightTab('annotations');
+  };
+
+  const handleResolveAnnotation = (annId: string) => {
+    if (!sendWs({ type: 'annotation:resolve', id: annId })) {
+      applyLocalRoomMutation((prev) => ({
+        ...prev,
+        annotations: prev.annotations.map((a) =>
+          a.id === annId ? { ...a, resolved: !a.resolved } : a
+        ),
+      }));
+    }
+  };
+
+  const handleTimerControl = (action: 'start' | 'pause' | 'reset') => {
+    if (!sendWs({ type: 'timer:control', action })) {
+      applyLocalRoomMutation((prev) => {
+        const t = prev.timer;
+        if (action === 'start' && !t.running) {
+          return {
+            ...prev,
+            timer: { ...t, running: true, startedAt: Date.now() },
+          };
+        }
+        if (action === 'pause' && t.running && t.startedAt) {
+          const delta = Math.max(0, Math.floor((Date.now() - t.startedAt) / 1000));
+          return {
+            ...prev,
+            timer: {
+              ...t,
+              elapsedBeforePause: t.elapsedBeforePause + delta,
+              startedAt: null,
+              running: false,
+            },
+          };
+        }
+        if (action === 'reset') {
+          return {
+            ...prev,
+            timer: { ...t, elapsedBeforePause: 0, startedAt: null, running: false },
+          };
+        }
+        return prev;
+      });
+    }
+  };
+
+  const handleClaimDriver = () => {
+    if (!sendWs({ type: 'role:claim_driver', targetId: clientId })) {
+      applyLocalRoomMutation((prev) => ({
+        ...prev,
+        driverId: clientId,
+        participants: prev.participants.map((p) => ({
+          ...p,
+          role: p.clientId === clientId ? 'driver' : 'navigator',
+        })),
+      }));
+    }
+  };
+
+  const handleLanguageChange = (language: LanguageId) => {
+    if (!sendWs({ type: 'language:change', language })) {
+      applyLocalRoomMutation((prev) => ({
+        ...prev,
+        language,
+        files: prev.files.map((f) =>
+          f.id === prev.activeFileId ? { ...f, language } : f
+        ),
+      }));
+    }
   };
 
   const jumpToLine = (lineNum: number) => {
@@ -482,14 +869,43 @@ export function PairStudioView({
   const handleLoadPreset = (presetId: string) => {
     const preset = CHALLENGE_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
-    sendWs({
-      type: 'template:load',
-      title: preset.title,
-      language: preset.language,
-      fileName: preset.fileName,
-      code: preset.code,
-      checklist: preset.checklist,
-    });
+    if (
+      !sendWs({
+        type: 'template:load',
+        title: preset.title,
+        language: preset.language,
+        fileName: preset.fileName,
+        code: preset.code,
+        checklist: preset.checklist,
+      })
+    ) {
+      applyLocalRoomMutation((prev) => ({
+        ...prev,
+        title: preset.title,
+        language: preset.language,
+        activeFileId: prev.files[0]?.id || 'file_main',
+        files:
+          prev.files.length > 0
+            ? prev.files.map((f, idx) =>
+                idx === 0
+                  ? { ...f, name: preset.fileName, language: preset.language, content: preset.code }
+                  : f
+              )
+            : [
+                {
+                  id: 'file_main',
+                  name: preset.fileName,
+                  language: preset.language,
+                  content: preset.code,
+                },
+              ],
+        checklist: preset.checklist.map((text, idx) => ({
+          id: `chk_${idx}_${Date.now()}`,
+          text,
+          done: false,
+        })),
+      }));
+    }
   };
 
   if (roomError) {
@@ -551,16 +967,20 @@ export function PairStudioView({
                   className={`w-1.5 h-1.5 rounded-full ${
                     connStatus === 'connected'
                       ? 'bg-emerald-600'
-                      : connStatus === 'connecting'
-                        ? 'bg-amber-500'
-                        : 'bg-red-500'
+                      : connStatus === 'serverless'
+                        ? 'bg-blue-600'
+                        : connStatus === 'connecting'
+                          ? 'bg-amber-500'
+                          : 'bg-red-500'
                   }`}
                 />
                 {connStatus === 'connected'
                   ? `Live · ${room.participants.length} ${room.participants.length === 1 ? 'peer' : 'peers'}`
-                  : connStatus === 'connecting'
-                    ? 'Connecting...'
-                    : 'Reconnecting...'}
+                  : connStatus === 'serverless'
+                    ? 'Serverless · Local & Multi-tab Sync'
+                    : connStatus === 'connecting'
+                      ? 'Connecting...'
+                      : 'Reconnecting...'}
               </span>
               <span aria-hidden="true">·</span>
               <span className="font-mono">
@@ -609,12 +1029,7 @@ export function PairStudioView({
             </span>
             <button
               type="button"
-              onClick={() =>
-                sendWs({
-                  type: 'timer:control',
-                  action: room.timer.running ? 'pause' : 'start',
-                })
-              }
+              onClick={() => handleTimerControl(room.timer.running ? 'pause' : 'start')}
               aria-label={room.timer.running ? 'Pause timer' : 'Start timer'}
               className="p-1 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white cursor-pointer"
             >
@@ -622,7 +1037,7 @@ export function PairStudioView({
             </button>
             <button
               type="button"
-              onClick={() => sendWs({ type: 'timer:control', action: 'reset' })}
+              onClick={() => handleTimerControl('reset')}
               aria-label="Reset timer"
               className="p-1 text-slate-500 hover:text-slate-900 dark:hover:text-white cursor-pointer"
             >
@@ -632,7 +1047,7 @@ export function PairStudioView({
 
           <button
             type="button"
-            onClick={() => sendWs({ type: 'role:claim_driver', targetId: clientId })}
+            onClick={handleClaimDriver}
             className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               isDriver
                 ? 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-900 dark:border-slate-100'
@@ -644,9 +1059,7 @@ export function PairStudioView({
 
           <select
             value={activeFile.language}
-            onChange={(e) =>
-              sendWs({ type: 'language:change', language: e.target.value as LanguageId })
-            }
+            onChange={(e) => handleLanguageChange(e.target.value as LanguageId)}
             aria-label="Editor language"
             className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200"
           >
@@ -793,7 +1206,7 @@ export function PairStudioView({
                   key={file.id}
                   type="button"
                   onClick={() => {
-                    setRoom((prev) => (prev ? { ...prev, activeFileId: file.id } : prev));
+                    applyLocalRoomMutation((prev) => ({ ...prev, activeFileId: file.id }));
                     sendWs({ type: 'file:switch', fileId: file.id });
                   }}
                   className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-mono rounded-lg text-left transition-colors cursor-pointer ${
@@ -860,7 +1273,7 @@ export function PairStudioView({
                   <input
                     type="checkbox"
                     checked={item.done}
-                    onChange={() => sendWs({ type: 'checklist:toggle', itemId: item.id })}
+                    onChange={() => handleToggleChecklistItem(item.id)}
                     className="mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-600 cursor-pointer"
                   />
                   <span
@@ -1182,7 +1595,7 @@ export function PairStudioView({
                 value={room.notes}
                 onChange={(e) => {
                   const next = e.target.value;
-                  setRoom((prev) => (prev ? { ...prev, notes: next } : prev));
+                  applyLocalRoomMutation((prev) => ({ ...prev, notes: next }));
                   sendWs({ type: 'notes:update', notes: next });
                 }}
                 placeholder="Write architecture tradeoffs, benchmarks, or follow-up links..."
@@ -1219,7 +1632,7 @@ export function PairStudioView({
                       </button>
                       <button
                         type="button"
-                        onClick={() => sendWs({ type: 'annotation:resolve', id: ann.id })}
+                        onClick={() => handleResolveAnnotation(ann.id)}
                         className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-900 dark:hover:text-slate-200 cursor-pointer"
                       >
                         {ann.resolved ? (

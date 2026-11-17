@@ -1,0 +1,238 @@
+{
+  "accounts": [
+    {
+      "id": "usr_1794908721160_26e3c5",
+      "email": "manesamrudhi2706@gmail.com",
+      "passwordSalt": "e5d2b5c8f7a33a1cb566f487a65390ae",
+      "passwordHash": "e8677465d75014cf39e3ed20d8702e1e21549c5070fb111acadbe5e9d074e4dd597ea6ebe67b80dcf92b3b5a909c34041b97d66509dde0235227b54644059e12",
+      "profile": {
+        "id": "usr_1794908721160_26e3c5",
+        "email": "manesamrudhi2706@gmail.com",
+        "name": "Samruddhi Mane",
+        "handle": "@samruddhimane",
+        "role": "Full-Stack Developer",
+        "skillTier": "Beginner",
+        "timezone": "Asia/Calcutta",
+        "bio": "Excited to exchange skills and pair program in live sessions.",
+        "offers": [
+          "JavaScript",
+          "HTML & CSS"
+        ],
+        "seeks": [
+          "TypeScript",
+          "React"
+        ],
+        "projects": [],
+        "availability": "Available now",
+        "hoursTaught": 0,
+        "hoursLearned": 0
+      },
+      "createdAt": 1794908721226
+    },
+    {
+      "id": "usr_1794908931012_15c88a",
+      "email": "quicktest_1794908930923@example.com",
+      "passwordSalt": "cfea50502568bb1e4a6295e752841395",
+      "passwordHash": "76142076deabfef6f9c10d0e7d64a7b109fe63ec044077c46256bd146e30995a0bc36086507a417939fcedbfb05e994be8dde4f9011c92b497e0a558dda5fc85",
+      "profile": {
+        "id": "usr_1794908931012_15c88a",
+        "email": "quicktest_1794908930923@example.com",
+        "name": "Quicktest 1794908930923",
+        "handle": "@quicktest1794908930923",
+        "role": "Full-Stack Developer",
+        "skillTier": "Beginner",
+        "timezone": "UTC",
+        "bio": "Building projects and pairing on Sigma.",
+        "offers": [
+          "JavaScript",
+          "HTML & CSS"
+        ],
+        "seeks": [
+          "TypeScript",
+          "React"
+        ],
+        "projects": [],
+        "availability": "Available now",
+        "hoursTaught": 0,
+        "hoursLearned": 0
+      },
+      "createdAt": 1794908931091
+    }
+  ],
+  "swaps": [
+    {
+      "id": "swap_welcome_1794908931092_5ih",
+      "roomId": "SIGMA-C88A",
+      "title": "JavaScript ↔ TypeScript Starter Lab",
+      "requesterId": "usr_1794908931012_15c88a",
+      "requesterName": "Quicktest 1794908930923",
+      "requesterHandle": "@quicktest1794908930923",
+      "partnerId": "dev_kenji",
+      "partnerName": "Kenji Takahashi",
+      "partnerHandle": "@ktakahashi",
+      "offerSkill": "JavaScript",
+      "seekSkill": "TypeScript",
+      "durationMinutes": 45,
+      "status": "active",
+      "isPrivate": true,
+      "scheduledLabel": "Private sandbox",
+      "goalNotes": "Your private starter room. Practice solo or switch to Invite-Only to pair live.",
+      "createdAt": 1794908931092
+    },
+    {
+      "id": "swap_welcome_1794908721226_b6h",
+      "roomId": "SIGMA-E3C5",
+      "title": "JavaScript ↔ TypeScript Starter Lab",
+      "requesterId": "usr_1794908721160_26e3c5",
+      "requesterName": "Samruddhi Mane",
+      "requesterHandle": "@samruddhimane",
+      "partnerId": "dev_kenji",
+      "partnerName": "Kenji Takahashi",
+      "partnerHandle": "@ktakahashi",
+      "offerSkill": "JavaScript",
+      "seekSkill": "TypeScript",
+      "durationMinutes": 45,
+      "status": "active",
+      "isPrivate": true,
+      "scheduledLabel": "Private sandbox",
+      "goalNotes": "Your private starter room. Practice solo or switch to Invite-Only to pair live.",
+      "createdAt": 1794908721226
+    }
+  ],
+  "rooms": {
+    "SIGMA-E3C5": {
+      "roomId": "SIGMA-E3C5",
+      "ownerId": "usr_1794908721160_26e3c5",
+      "allowedUserIds": [
+        "usr_1794908721160_26e3c5"
+      ],
+      "isPrivate": true,
+      "title": "JavaScript ↔ TypeScript Starter Lab",
+      "offerSkill": "JavaScript",
+      "seekSkill": "TypeScript",
+      "language": "typescript",
+      "files": [
+        {
+          "id": "file_main",
+          "name": "rateLimiter.ts",
+          "language": "typescript",
+          "content": "interface Bucket {\n  tokens: number;\n  lastRefillMs: number;\n}\n\nexport class TokenBucketLimiter {\n  private readonly capacity: number;\n  private readonly refillPerSec: number;\n  private buckets = new Map<string, Bucket>();\n\n  constructor(capacity: number, refillPerSec: number) {\n    this.capacity = capacity;\n    this.refillPerSec = refillPerSec;\n  }\n\n  allow(clientKey: string, nowMs: number = Date.now()): boolean {\n    const existing = this.buckets.get(clientKey) ?? {\n      tokens: this.capacity,\n      lastRefillMs: nowMs,\n    };\n\n    const elapsedSec = Math.max(0, (nowMs - existing.lastRefillMs) / 1000);\n    const replenished = Math.min(\n      this.capacity,\n      existing.tokens + elapsedSec * this.refillPerSec\n    );\n\n    if (replenished < 1) {\n      this.buckets.set(clientKey, { tokens: replenished, lastRefillMs: nowMs });\n      return false;\n    }\n\n    this.buckets.set(clientKey, { tokens: replenished - 1, lastRefillMs: nowMs });\n    return true;\n  }\n}\n\nconst limiter = new TokenBucketLimiter(3, 2);\nconst t0 = 1_000_000;\nconsole.log('Req 1:', limiter.allow('user-42', t0));\nconsole.log('Req 2:', limiter.allow('user-42', t0 + 10));\nconsole.log('Req 3:', limiter.allow('user-42', t0 + 20));\nconsole.log('Req 4 (blocked):', limiter.allow('user-42', t0 + 30));\nconsole.log('Req 5 (+600ms):', limiter.allow('user-42', t0 + 630));\n"
+        },
+        {
+          "id": "file_notes",
+          "name": "pairing_plan.md",
+          "language": "typescript",
+          "content": "// Session Notes & Pairing Plan\n// 1. Align on constraints and edge cases\n// 2. Driver writes core implementation; Navigator reviews\n// 3. Rotate Driver/Navigator roles every 15 minutes\n"
+        }
+      ],
+      "activeFileId": "file_main",
+      "participants": [],
+      "checklist": [
+        {
+          "id": "chk_0_1794908721227",
+          "text": "Confirm exchange goals & test inputs",
+          "done": true
+        },
+        {
+          "id": "chk_1_1794908721227",
+          "text": "Implement core logic as Driver/Navigator pair",
+          "done": false
+        },
+        {
+          "id": "chk_2_1794908721227",
+          "text": "Run verification suite in shared console",
+          "done": false
+        }
+      ],
+      "notes": "Focus areas:\n- Keep functions pure where possible for unit testing\n- Benchmark latency and edge cases before finalizing",
+      "messages": [
+        {
+          "id": "msg_sys_1794908721227",
+          "senderId": "system",
+          "senderName": "Session Host",
+          "senderHandle": "@sigma",
+          "color": "#475569",
+          "text": "Private workspace SIGMA-E3C5 created. Only your account can access this room.",
+          "timestamp": 1794908721227
+        }
+      ],
+      "annotations": [],
+      "executionLogs": [],
+      "timer": {
+        "durationSeconds": 2700,
+        "elapsedBeforePause": 0,
+        "startedAt": null,
+        "running": false
+      },
+      "driverId": null,
+      "createdAt": 1794908721227
+    },
+    "SIGMA-C88A": {
+      "roomId": "SIGMA-C88A",
+      "ownerId": "usr_1794908931012_15c88a",
+      "allowedUserIds": [
+        "usr_1794908931012_15c88a"
+      ],
+      "isPrivate": true,
+      "title": "JavaScript ↔ TypeScript Starter Lab",
+      "offerSkill": "JavaScript",
+      "seekSkill": "TypeScript",
+      "language": "typescript",
+      "files": [
+        {
+          "id": "file_main",
+          "name": "rateLimiter.ts",
+          "language": "typescript",
+          "content": "interface Bucket {\n  tokens: number;\n  lastRefillMs: number;\n}\n\nexport class TokenBucketLimiter {\n  private readonly capacity: number;\n  private readonly refillPerSec: number;\n  private buckets = new Map<string, Bucket>();\n\n  constructor(capacity: number, refillPerSec: number) {\n    this.capacity = capacity;\n    this.refillPerSec = refillPerSec;\n  }\n\n  allow(clientKey: string, nowMs: number = Date.now()): boolean {\n    const existing = this.buckets.get(clientKey) ?? {\n      tokens: this.capacity,\n      lastRefillMs: nowMs,\n    };\n\n    const elapsedSec = Math.max(0, (nowMs - existing.lastRefillMs) / 1000);\n    const replenished = Math.min(\n      this.capacity,\n      existing.tokens + elapsedSec * this.refillPerSec\n    );\n\n    if (replenished < 1) {\n      this.buckets.set(clientKey, { tokens: replenished, lastRefillMs: nowMs });\n      return false;\n    }\n\n    this.buckets.set(clientKey, { tokens: replenished - 1, lastRefillMs: nowMs });\n    return true;\n  }\n}\n\nconst limiter = new TokenBucketLimiter(3, 2);\nconst t0 = 1_000_000;\nconsole.log('Req 1:', limiter.allow('user-42', t0));\nconsole.log('Req 2:', limiter.allow('user-42', t0 + 10));\nconsole.log('Req 3:', limiter.allow('user-42', t0 + 20));\nconsole.log('Req 4 (blocked):', limiter.allow('user-42', t0 + 30));\nconsole.log('Req 5 (+600ms):', limiter.allow('user-42', t0 + 630));\n"
+        },
+        {
+          "id": "file_notes",
+          "name": "pairing_plan.md",
+          "language": "typescript",
+          "content": "// Session Notes & Pairing Plan\n// 1. Align on constraints and edge cases\n// 2. Driver writes core implementation; Navigator reviews\n// 3. Rotate Driver/Navigator roles every 15 minutes\n"
+        }
+      ],
+      "activeFileId": "file_main",
+      "participants": [],
+      "checklist": [
+        {
+          "id": "chk_0_1794908931093",
+          "text": "Confirm exchange goals & test inputs",
+          "done": true
+        },
+        {
+          "id": "chk_1_1794908931093",
+          "text": "Implement core logic as Driver/Navigator pair",
+          "done": false
+        },
+        {
+          "id": "chk_2_1794908931093",
+          "text": "Run verification suite in shared console",
+          "done": false
+        }
+      ],
+      "notes": "Focus areas:\n- Keep functions pure where possible for unit testing\n- Benchmark latency and edge cases before finalizing",
+      "messages": [
+        {
+          "id": "msg_sys_1794908931093",
+          "senderId": "system",
+          "senderName": "Session Host",
+          "senderHandle": "@sigma",
+          "color": "#475569",
+          "text": "Private workspace SIGMA-C88A created. Only your account can access this room.",
+          "timestamp": 1794908931093
+        }
+      ],
+      "annotations": [],
+      "executionLogs": [],
+      "timer": {
+        "durationSeconds": 2700,
+        "elapsedBeforePause": 0,
+        "startedAt": null,
+        "running": false
+      },
+      "driverId": null,
+      "createdAt": 1794908931093
+    }
+  }
+}

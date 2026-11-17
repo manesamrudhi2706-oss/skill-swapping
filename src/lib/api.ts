@@ -32,3 +32,22 @@ export function apiFetch(input: string, init?: RequestInit): Promise<Response> {
     credentials: 'same-origin',
   });
 }
+
+export async function safeJson<T>(res: Response): Promise<T | null> {
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    // Still attempt parse in case header was stripped, but guard against HTML
+    try {
+      const text = await res.text();
+      if (!text || text.trim().startsWith('<')) return null;
+      return JSON.parse(text) as T;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
